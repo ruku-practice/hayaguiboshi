@@ -845,3 +845,11 @@ function handleAction(element) {
 }
 
 render();
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {
+      // PWA is best-effort. The app still works without the service worker.
+    });
+  });
+}
