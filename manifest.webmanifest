@@ -1,6 +1,6 @@
 {
   "name": "よく噛んでゆっくりたべよう",
-  "short_name": "満腹待ち",
+  "short_name": "ゆっくり食べる",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
