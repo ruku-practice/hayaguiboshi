@@ -1,4 +1,4 @@
-const CACHE_VERSION = "slow-meal-pwa-v4";
+const CACHE_VERSION = "slow-meal-pwa-v5";
 const APP_SHELL = [
   "./",
   "./index.html",

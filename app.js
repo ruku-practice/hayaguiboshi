@@ -3,6 +3,7 @@ const SETTINGS_KEY = "slowMealApp.settings.v1";
 
 let wakeLock = null;
 let keepAliveAudio = null;
+let noSleepVideo = null;
 
 const strategies = [
   { id: "eat_over_target_minutes", label: "20分以上かけて食べる" },
@@ -118,30 +119,12 @@ const defaultSettings = {
   sound: true,
   vibration: true,
   supporterId: "sakuya",
+  systemNotification: false,
+  notificationIntervalMinutes: 5,
+  notifyOnlyEnd: false,
 };
 
 const app = document.querySelector("#app");
-
-let state = {
-  screen: "home",
-  sessions: loadSessions(),
-  settings: loadSettings(),
-  selectedStrategy: null,
-  activeSession: null,
-  elapsedSeconds: 0,
-  timerId: null,
-  modal: null,
-  review: {
-    result: null,
-    causes: [],
-    strategyResult: null,
-    memo: "",
-  },
-  emergencyStartedAt: null,
-  wakeLock: null,
-  audioContext: null,
-  startTime: 0,
-};
 
 let state = {
   screen: "home",
@@ -191,8 +174,11 @@ function setScreen(screen) {
   render();
 }
 
+const NO_SLEEP_VIDEO_B64 = "data:video/mp4;base64,AAAAHGZ0eXBtcDQyAAAAAG1wZDJsYnJhAAAAAG1vb3YAAABsbXZoZAAAAADVV9n41VfZ+AAAA+gAAAAAAAEAAAEAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAACJdHJhawAAAFx0a2hkAAAAAdVX2fjVV9n4AAAAAQAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAABbWRpYQAAACBtZGhkAAAAAdVX2fjVV9n4AAB1MAAAA+gUAAAAAC1oZGxyAAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAVmlkZW9IYW5kbGVyAAAAAVxtaW5mAAAAEGRtaGQAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAUBzdGJsAAAAZ3N0c2QAAAAAAAAAAQAAAFdhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAHgAeABAgAAAAAAASEF2YzEAAAAAAAAAAB7/AAAAGkF2Y0MBQsAP/+EAFWdvdz8A8D2A/gIAAAMAAQAAAwC8DhwBMAGB//8AAAA4dXRzcwAAAAEAAAAAAAAAAAAAAAABAAAAAQAAAAEAAAABAAAAAQAAC3B1c3NwAAAAAQAAAAAAAAAAAAE=";
+
 async function requestWakeLock() {
   if (!('wakeLock' in navigator)) return;
+  if (wakeLock) return;
   try {
     wakeLock = await navigator.wakeLock.request('screen');
     console.log("Wake Lock acquired");
@@ -206,11 +192,14 @@ function releaseWakeLock() {
     wakeLock.release().then(() => {
       wakeLock = null;
       console.log("Wake Lock released");
+    }).catch((err) => {
+      console.error("Wake Lock release error:", err);
     });
   }
 }
 
 function startKeepAliveAudio() {
+  if (keepAliveAudio) return;
   try {
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     if (!AudioContext) return;
@@ -236,7 +225,48 @@ function stopKeepAliveAudio() {
     keepAliveAudio.close().then(() => {
       keepAliveAudio = null;
       console.log("Keep-alive audio stopped");
+    }).catch((err) => {
+      console.error("Keep-alive audio stop error:", err);
     });
+  }
+}
+
+function enableNoSleep() {
+  if (noSleepVideo) return;
+  try {
+    noSleepVideo = document.createElement("video");
+    noSleepVideo.setAttribute("playsinline", "");
+    noSleepVideo.setAttribute("muted", "");
+    noSleepVideo.setAttribute("loop", "");
+    noSleepVideo.style.position = "absolute";
+    noSleepVideo.style.width = "1px";
+    noSleepVideo.style.height = "1px";
+    noSleepVideo.style.opacity = "0.01";
+    noSleepVideo.style.pointerEvents = "none";
+    noSleepVideo.src = NO_SLEEP_VIDEO_B64;
+    document.body.appendChild(noSleepVideo);
+    
+    noSleepVideo.play().then(() => {
+      console.log("NoSleep video playing successfully");
+    }).catch((err) => {
+      console.warn("Failed to play NoSleep video:", err);
+    });
+  } catch (err) {
+    console.error("NoSleep video init error:", err);
+  }
+}
+
+function disableNoSleep() {
+  if (noSleepVideo) {
+    try {
+      noSleepVideo.pause();
+      noSleepVideo.remove();
+      noSleepVideo.src = "";
+      noSleepVideo = null;
+      console.log("NoSleep video stopped and removed");
+    } catch (err) {
+      console.error("NoSleep video disable error:", err);
+    }
   }
 }
 
@@ -247,6 +277,7 @@ function resetTimer() {
   state.timerId = null;
   releaseWakeLock();
   stopKeepAliveAudio();
+  disableNoSleep();
 }
 
 function startMeal() {
@@ -270,10 +301,31 @@ function startMeal() {
   };
   state.screen = "timer";
   resetTimer();
+  if (state.settings.systemNotification && "Notification" in window) {
+    if (Notification.permission === "default") {
+      Notification.requestPermission().then((permission) => {
+        console.log("Notification permission:", permission);
+      });
+    }
+  }
   requestWakeLock();
   startKeepAliveAudio();
   state.timerId = setInterval(tick, 1000);
   render();
+}
+
+function sendSystemNotification(title, body) {
+  if (!state.settings.systemNotification) return;
+  if ("Notification" in window && Notification.permission === "granted") {
+    try {
+      new Notification(title, {
+        body: body,
+        icon: "./icon-192.png"
+      });
+    } catch (err) {
+      console.warn("Notification error:", err);
+    }
+  }
 }
 
 function checkNotification(seconds) {
@@ -287,6 +339,28 @@ function checkNotification(seconds) {
   }
   if (seconds === state.activeSession.targetDurationSeconds) {
     notifySoft(true);
+  }
+
+  // システム通知の処理
+  if (state.settings.systemNotification) {
+    const targetSeconds = state.activeSession.targetDurationSeconds;
+    const supporter = getSelectedSupporter();
+    const supporterName = supporter ? supporter.name : "応援サポーター";
+
+    if (seconds === targetSeconds) {
+      sendSystemNotification(
+        "ゆっくり食べよう",
+        `${supporterName}「目標の${targetSeconds / 60}分が経ったよ！よくがんばったね。食事を終了しよう！」`
+      );
+    } else if (!state.settings.notifyOnlyEnd) {
+      const intervalSec = state.settings.notificationIntervalMinutes * 60;
+      if (seconds > 0 && seconds % intervalSec === 0 && seconds < targetSeconds) {
+        sendSystemNotification(
+          "ゆっくり食べよう",
+          `${supporterName}「${seconds / 60}分経過したよ。よく噛んで、ゆっくり食べようね！」`
+        );
+      }
+    }
   }
 }
 
@@ -485,41 +559,6 @@ function getSlowStreak(sessions) {
   return count;
 }
 
-function requestWakeLock() {
-  if ("wakeLock" in navigator) {
-    navigator.wakeLock.request("screen").then((lock) => {
-      state.wakeLock = lock;
-    }).catch((err) => {
-      console.error('The screen wake lock could not be acquired:', err);
-    });
-  }
-}
-
-function releaseWakeLock() {
-  if (state.wakeLock) {
-    state.wakeLock.release();
-    delete state.wakeLock;
-  }
-}
-
-function startKeepAliveAudio() {
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) return;
-  state.audioContext = new AudioContext();
-  const buffer = state.audioContext.createBuffer(1, 1, 44100);
-  const source = state.audioContext.createBufferSource();
-  source.buffer = buffer;
-  source.connect(state.audioContext.destination);
-  source.start();
-}
-
-function stopKeepAliveAudio() {
-  if (state.audioContext) {
-    state.audioContext.close();
-    delete state.audioContext;
-  }
-}
-
 function render() {
   const screens = {
     home: renderHome,
@@ -536,9 +575,11 @@ function render() {
   if (state.screen === 'timer') {
     requestWakeLock();
     startKeepAliveAudio();
+    enableNoSleep();
   } else {
     releaseWakeLock();
     stopKeepAliveAudio();
+    disableNoSleep();
   }
 }
 
@@ -855,6 +896,34 @@ function renderSettings() {
             <span class="switch-knob"></span>
           </button>
         </div>
+        <div class="setting-row">
+          <div>
+            <div class="label">システム通知</div>
+            <p class="lead">タイマー中の経過や終了を画面外でお知らせします。</p>
+          </div>
+          <button class="switch ${state.settings.systemNotification ? "on" : ""}" data-action="toggle-setting" data-key="systemNotification" aria-label="システム通知">
+            <span class="switch-knob"></span>
+          </button>
+        </div>
+        ${state.settings.systemNotification ? `
+          <div class="setting-row">
+            <div>
+              <div class="label">終了時間のみ通知</div>
+              <p class="lead">目標時間に達した時だけ通知します。</p>
+            </div>
+            <button class="switch ${state.settings.notifyOnlyEnd ? "on" : ""}" data-action="toggle-setting" data-key="notifyOnlyEnd" aria-label="終了時間のみ通知">
+              <span class="switch-knob"></span>
+            </button>
+          </div>
+          ${!state.settings.notifyOnlyEnd ? `
+            <div class="field">
+              <label class="label" for="notificationIntervalMinutes">システム通知間隔</label>
+              <select id="notificationIntervalMinutes" data-action="setting-select" data-key="notificationIntervalMinutes">
+                ${[1, 2, 3, 5, 10].map((minute) => `<option value="${minute}" ${state.settings.notificationIntervalMinutes === minute ? "selected" : ""}>${minute}分ごと</option>`).join("")}
+              </select>
+            </div>
+          ` : ""}
+        ` : ""}
       </section>
       <section class="panel">
         <h3>応援キャラ</h3>
