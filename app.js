@@ -1,6 +1,9 @@
 const STORAGE_KEY = "slowMealApp.sessions.v1";
 const SETTINGS_KEY = "slowMealApp.settings.v1";
 
+let wakeLock = null;
+let keepAliveAudio = null;
+
 const strategies = [
   { id: "eat_over_target_minutes", label: "20分以上かけて食べる" },
   { id: "put_down_chopsticks", label: "ひと口ごとに箸を置く" },
@@ -135,6 +138,28 @@ let state = {
     memo: "",
   },
   emergencyStartedAt: null,
+  wakeLock: null,
+  audioContext: null,
+  startTime: 0,
+};
+
+let state = {
+  screen: "home",
+  sessions: loadSessions(),
+  settings: loadSettings(),
+  selectedStrategy: null,
+  activeSession: null,
+  elapsedSeconds: 0,
+  timerId: null,
+  modal: null,
+  review: {
+    result: null,
+    causes: [],
+    strategyResult: null,
+    memo: "",
+  },
+  emergencyStartedAt: null,
+  startTime: null,
 };
 
 function loadSessions() {
@@ -166,17 +191,69 @@ function setScreen(screen) {
   render();
 }
 
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    console.log("Wake Lock acquired");
+  } catch (err) {
+    console.error(`Wake Lock error: ${err.name}, ${err.message}`);
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) {
+    wakeLock.release().then(() => {
+      wakeLock = null;
+      console.log("Wake Lock released");
+    });
+  }
+}
+
+function startKeepAliveAudio() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    keepAliveAudio = new AudioContext();
+    const bufferSize = keepAliveAudio.sampleRate * 2;
+    const buffer = keepAliveAudio.createBuffer(1, bufferSize, keepAliveAudio.sampleRate);
+    const source = keepAliveAudio.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    const gainNode = keepAliveAudio.createGain();
+    gainNode.gain.value = 0.001; // Almost silent
+    source.connect(gainNode);
+    gainNode.connect(keepAliveAudio.destination);
+    source.start();
+    console.log("Keep-alive audio started");
+  } catch (err) {
+    console.error("Keep-alive audio error:", err);
+  }
+}
+
+function stopKeepAliveAudio() {
+  if (keepAliveAudio) {
+    keepAliveAudio.close().then(() => {
+      keepAliveAudio = null;
+      console.log("Keep-alive audio stopped");
+    });
+  }
+}
+
 function resetTimer() {
   if (state.timerId) {
     clearInterval(state.timerId);
   }
   state.timerId = null;
+  releaseWakeLock();
+  stopKeepAliveAudio();
 }
 
 function startMeal() {
   if (!state.selectedStrategy) return;
   const supporter = getSelectedSupporter();
   state.elapsedSeconds = 0;
+  state.startTime = Date.now();
   state.activeSession = {
     id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}`,
     startedAt: new Date().toISOString(),
@@ -193,27 +270,40 @@ function startMeal() {
   };
   state.screen = "timer";
   resetTimer();
+  requestWakeLock();
+  startKeepAliveAudio();
   state.timerId = setInterval(tick, 1000);
   render();
 }
 
-function tick() {
-  if (!state.activeSession) return;
-  state.elapsedSeconds += 1;
-  state.activeSession.durationSeconds = state.elapsedSeconds;
-
+function checkNotification(seconds) {
   const interval = state.settings.reminderSeconds;
-  if (state.elapsedSeconds > 0 && state.elapsedSeconds % interval === 0) {
+  if (seconds > 0 && seconds % interval === 0) {
     notifySoft();
   }
-  if (state.elapsedSeconds === 300 || state.elapsedSeconds === 600) {
+  if (seconds === 300 || seconds === 600) {
     state.modal = "fullnessPrompt";
     notifySoft();
   }
-  if (state.elapsedSeconds === state.activeSession.targetDurationSeconds) {
+  if (seconds === state.activeSession.targetDurationSeconds) {
     notifySoft(true);
   }
-  render();
+}
+
+function tick() {
+  if (!state.activeSession || !state.startTime) return;
+  const now = Date.now();
+  const actualElapsed = Math.floor((now - state.startTime) / 1000);
+  const prevElapsed = state.elapsedSeconds;
+
+  if (actualElapsed > prevElapsed) {
+    state.elapsedSeconds = actualElapsed;
+    state.activeSession.durationSeconds = state.elapsedSeconds;
+    for (let s = prevElapsed + 1; s <= actualElapsed; s++) {
+      checkNotification(s);
+    }
+    render();
+  }
 }
 
 function notifySoft(stronger = false) {
@@ -395,6 +485,41 @@ function getSlowStreak(sessions) {
   return count;
 }
 
+function requestWakeLock() {
+  if ("wakeLock" in navigator) {
+    navigator.wakeLock.request("screen").then((lock) => {
+      state.wakeLock = lock;
+    }).catch((err) => {
+      console.error('The screen wake lock could not be acquired:', err);
+    });
+  }
+}
+
+function releaseWakeLock() {
+  if (state.wakeLock) {
+    state.wakeLock.release();
+    delete state.wakeLock;
+  }
+}
+
+function startKeepAliveAudio() {
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContext) return;
+  state.audioContext = new AudioContext();
+  const buffer = state.audioContext.createBuffer(1, 1, 44100);
+  const source = state.audioContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(state.audioContext.destination);
+  source.start();
+}
+
+function stopKeepAliveAudio() {
+  if (state.audioContext) {
+    state.audioContext.close();
+    delete state.audioContext;
+  }
+}
+
 function render() {
   const screens = {
     home: renderHome,
@@ -407,6 +532,14 @@ function render() {
   };
   app.innerHTML = screens[state.screen]();
   bindEvents();
+
+  if (state.screen === 'timer') {
+    requestWakeLock();
+    startKeepAliveAudio();
+  } else {
+    releaseWakeLock();
+    stopKeepAliveAudio();
+  }
 }
 
 function renderTopbar(title = "") {
@@ -845,6 +978,12 @@ function handleAction(element) {
 }
 
 render();
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.screen === 'timer') {
+    requestWakeLock();
+  }
+});
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
